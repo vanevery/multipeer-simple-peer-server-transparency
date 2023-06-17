@@ -1,0 +1,279 @@
+<html>
+	<head>
+	 	<script src="simplepeer.min.js"></script>
+		<script type="text/javascript" src="/socket.io/socket.io.js"></script>
+	
+		<script type="text/javascript">
+		
+			const DEBUG = true;
+		
+			let simplepeers = [];
+			let whichPeer = -1;
+
+			var socket;
+			var mystream;
+			
+			window.addEventListener('load', function() {
+				/* Send Data to all peers */
+				document.getElementById("data_to_send_button").addEventListener('click', function() {
+					console.log("SEND:" + document.getElementById("data_to_send").value);
+					for (let i = 0; i < simplepeers.length; i++) {
+						// This might need some debugging
+						if (simplepeers[i] != null) {
+							console.log("Sending to: " + simplepeers[i].socket_id);
+							simplepeers[i].send(document.getElementById("data_to_send").value);
+						} else {
+							console.log(simplepeers[i], i, " is null");
+						}
+					}
+				});		
+
+				socket = io.connect();
+				
+				socket.on('connect', function() {
+					console.log("Socket Connected**");
+					initCapture();
+					console.log("My socket id: ", socket.id);
+				});
+
+				socket.on('disconnect', function(data) {
+					console.log("Socket disconnected");
+				});
+
+				socket.on('peer_disconnect', function(data) {
+					console.log("simplepeer has disconnected " + data);
+					for (let i = 0; i < peers.length; i++) {
+						if (simplepeers[i].socket_id == data) {
+							console.log("Removing simplepeer: " + i);
+							simplepeers.splice(i,1);
+						} 
+					}			
+				});			
+
+				// Receive from any event
+				socket.on('listresults', function (data) {
+					console.log(data);
+					for (let i = 0; i < data.length; i++) {
+						// Make sure it's not us
+						if (data[i] != socket.id) {					
+							initSimplePeer(true, data[i], incomingData, function(simplepeer) {
+								simplepeers.push(simplepeer);
+							});
+						}
+					}
+				});
+				
+				socket.on('signal', function(to, from, data) {
+				
+					console.log("Got a signal from the server: ", to, from, data);
+					
+					// to should be us
+					if (to != socket.id) {
+						console.log("Socket IDs don't match");
+					}
+					
+					// Getting an offer from someone else, create a peer
+					if (data.type == "offer") {
+						initSimplePeer(false, from, incomingData, function(simplepeer) {
+							simplepeers.push(simplepeer);
+							// Send the offer through
+							simplepeer.signalFromServer(data);
+						});
+					}
+					else if (data.type == "answer") {
+						console.log("got an answer!");
+						// Have a connection - tell the right simple peer object
+						let found = false;
+						for (let i = 0; i < simplepeers.length; i++)
+						{
+							
+							if (simplepeers[i].socket_id == from) {
+								console.log("Found right object");
+								// Send the answer through
+								simplepeers[i].signalFromServer(data);
+								found = true;
+								break;
+							}
+						
+						}	
+						if (!found) {
+							console.log("Never found right simplepeer object");
+						}
+					}
+				});
+				
+				function incomingData(from, data) {
+					console.log(data);
+					document.getElementById("data_received").innerHTML += from + ": " + data + "<br />";
+				}	
+
+			});
+
+			function initCapture() {
+				console.log("initCapture");
+				
+				// The video element on the page to display the webcam
+				let video = document.getElementById('myvideo');
+
+				// Constraints - what do we want?
+				let constraints = { audio: true, video: true }
+
+				// Prompt the user for permission, get the stream
+				navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+					/* Use the stream */
+
+					// Global object
+					mystream = stream;
+
+					// Attach to our video object
+					video.srcObject = stream;
+					
+					// Wait for the stream to load enough to play
+					video.onloadedmetadata = function(e) {
+						video.play();
+					};
+
+					// Now that we are ready for sending our stream
+					// Get a list of peers
+					socket.emit('list', {});
+				})
+				.catch(function(err) {
+					/* Handle the error */
+					alert(err);  
+				});	
+			}
+			
+			// This initiation has to happen for each peer connection
+			function initSimplePeer(initiator, socket_id, data_cb, init_cb) {
+
+				// Start using Simple Peer
+				let simplepeer = new SimplePeer({
+					initiator: initiator,
+					trickle: false
+				});
+
+				// Their socket id
+				simplepeer.socket_id = socket_id;
+				// My socket id - global
+				// socket.id 
+
+				// If there is an error
+				//simplepeer.on('error', err => console.log('error', err));
+				// Alternate:
+				simplepeer.on('error', function(err) {
+					console.log('ERROR'+ err);
+					// Remove from array??
+					/*
+					ERR_WEBRTC_SUPPORT
+					ERR_CREATE_OFFER
+					ERR_CREATE_ANSWER
+					ERR_SET_LOCAL_DESCRIPTION
+					ERR_SET_REMOTE_DESCRIPTION
+					ERR_ADD_ICE_CANDIDATE
+					ERR_ICE_CONNECTION_FAILURE
+					ERR_SIGNALING
+					ERR_DATA_CHANNEL
+					ERR_CONNECTION_FAILURE
+					*/
+					// This is too aggressive, need to be more choosy 
+					// for (let i = 0; i < simplepeers.length; i++) {
+					// 	if (this == simplepeers[i]) {
+					// 		console.log("removed simplepeer from array");
+					// 		simplepeers.splice(i,1);
+					// 	}
+					// }
+				});
+
+				/* 
+					When Simple Peer starts up, it generates a "signal" which is an "offer" 
+					that can be sent to another peer to initiate a connection.  It is
+					essentially our address.
+				
+					When we get an "answer" "signal" it means that someone got our "offer"
+					and is essentially giving us their address.	
+					
+					Here we are assuming we want to connect to anyone who wants to connect
+					to us.
+				*/
+				simplepeer.on('signal', data => {
+					// Put any signals that come out of simple peer in the console for now
+					console.log('SIGNAL', data);
+
+					// Single types from our local simplepeer - send to other user through socket
+					if (data.type == "offer") {
+						socket.emit('signal', socket_id, socket.id, data);
+					} else if (data.type == "answer") {
+						socket.emit('signal', socket_id, socket.id, data);
+					} else {
+						// There are other types that we need to just send through
+						socket.emit('signal', socket_id, socket.id, data);
+					}
+				});
+				
+				simplepeer.signalFromServer = function(signaldata) {
+					console.log("passing in signal from server", signaldata);
+					// this is simplepeer - pass the signal in to it
+					this.signal(signaldata);
+				};
+
+				/* 
+				Receive Data 
+				*/
+				simplepeer.on('data', data => {
+					console.log('DATA: ' + data);
+					data_cb(socket_id, data);
+				});
+
+				/*
+				Yay, we have a connection!
+				*/
+				simplepeer.on('connect', () => {
+					console.log('CONNECT')
+					console.log(simplepeer);
+					//p.send('whatever' + Math.random())
+
+					// Let's give them our stream
+					simplepeer.addStream(mystream);
+					console.log("Send our stream");
+				});
+
+				/*
+				Stream coming in to us
+				*/
+				simplepeer.on('stream', stream => {
+					console.log('Incoming Stream');
+
+					// Create a video object
+					let ovideo = document.createElement("VIDEO");
+					ovideo.id = simplepeer.socket_id;
+					ovideo.srcObject = stream;
+					ovideo.onloadedmetadata = function(e) {
+						ovideo.play();
+					};					
+					document.body.appendChild(ovideo);
+					console.log(ovideo);
+				});
+
+				init_cb(simplepeer);
+			}
+		</script>
+	</head>
+  <body>
+	<div>
+		Data to Send:
+		<input type="text" id="data_to_send"></input>
+		<button type="button" id="data_to_send_button">Send</button>
+	</div>
+
+	<div>
+		Received Data:
+		<pre id="data_received"></pre>
+	</div>
+
+	<div>
+		My Video:
+		<video id="myvideo" width="400" height="300" muted></video>
+	</div>
+
+  </body>
+</html>
